@@ -205,7 +205,7 @@ class VideoAgent:
             avg_dur = 10
         else:
             avg_dur = int(clip_duration)
-        scene_count = max(5, int((duration_min * 60) / avg_dur))
+        scene_count = max(1, int((duration_min * 60) / avg_dur))
 
         msg = (f'Тема: "{topic}"\nСтиль: {style}\n'
                f'Тривалість відео: ~{duration_min} хв (~{scene_count} сцен)\n'

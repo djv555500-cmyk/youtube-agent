@@ -84,14 +84,18 @@ class VideoGenerator:
         from diffusers import WanPipeline, WanImageToVideoPipeline
         from diffusers.utils import export_to_video
 
-        print("[VideoGen] Завантажую WAN 2.1 T2V 14B...")
-        self._wan_t2v = WanPipeline.from_pretrained(
-            self.WAN_T2V_PATH,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True
-        )
-        self._wan_t2v.enable_model_cpu_offload()
-        self._wan_t2v.enable_vae_slicing()
+        if os.path.exists(self.WAN_T2V_PATH):
+            print("[VideoGen] Завантажую WAN 2.1 T2V 14B...")
+            self._wan_t2v = WanPipeline.from_pretrained(
+                self.WAN_T2V_PATH,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True
+            )
+            self._wan_t2v.enable_model_cpu_offload()
+            self._wan_t2v.enable_vae_slicing()
+        else:
+            self._wan_t2v = None
+            print("[VideoGen] ⚠️ WAN T2V не знайдено в", self.WAN_T2V_PATH)
 
         if os.path.exists(self.WAN_I2V_PATH):
             print("[VideoGen] Завантажую WAN 2.1 I2V 14B...")
@@ -100,8 +104,9 @@ class VideoGenerator:
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True
             )
-            self._wan_i2v.enable_model_cpu_offload()
-            self._wan_i2v.enable_vae_slicing()
+            self._wan_i2v.enable_sequential_cpu_offload()
+            if hasattr(self._wan_i2v, "enable_vae_slicing"):
+                self._wan_i2v.enable_vae_slicing()
             print("[VideoGen] WAN I2V готовий ✅")
         else:
             self._wan_i2v = None
@@ -114,7 +119,20 @@ class VideoGenerator:
     def _gen_wan(self, prompt, negative, w, h, frames, fps, image_path, output_path):
         self._load_wan()
         from PIL import Image
-        if image_path and os.path.exists(image_path):
+        import numpy as np
+
+        use_i2v = image_path and os.path.exists(image_path)
+
+        # Fallback: no T2V model but I2V is available — use neutral gray start frame
+        if not use_i2v and self._wan_t2v is None and self._wan_i2v is not None:
+            gray = Image.fromarray(np.full((h, w, 3), 128, dtype=np.uint8))
+            tmp_path = output_path.replace(".mp4", "_init.png")
+            gray.save(tmp_path)
+            image_path = tmp_path
+            use_i2v = True
+            print("[VideoGen] T2V недоступна — використовую I2V з нейтральним кадром")
+
+        if use_i2v:
             if self._wan_i2v is None:
                 raise RuntimeError(
                     f"WAN I2V модель не знайдена в {self.WAN_I2V_PATH}. "
