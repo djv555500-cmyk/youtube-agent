@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.mp4
+*.tar.gz
+outputs/
+temp/
+models/
+agent_jobs.db
