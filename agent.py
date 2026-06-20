@@ -77,6 +77,9 @@ class VideoAgent:
         uploaded_photos  = cfg.get("uploaded_photos", [])
         frame_continuity = cfg.get("frame_continuity", False)
         clip_duration    = cfg.get("clip_duration", "5")   # "5"|"10"|"15"|"20"|"auto"
+        fps              = int(cfg.get("fps", 16))
+        steps            = int(cfg.get("steps", 15))
+        voice_sample     = cfg.get("voice_sample", "")
 
         try:
             # ── Step 1: Plan ──────────────────────────────────────────────────
@@ -159,7 +162,9 @@ class VideoAgent:
                     style=scene.get("style_hint", style),
                     scene_id=scene_id,
                     image_path=image_path,
-                    model=video_model
+                    model=video_model,
+                    fps=fps,
+                    steps=steps,
                 )
                 clip_paths.append(clip)
 
@@ -172,6 +177,9 @@ class VideoAgent:
             # ── Step 3: Voice ─────────────────────────────────────────────────
             db.update_job(job_id, progress=72, progress_text="🎙️ Генерація голосу...")
             narration  = self._build_narration(plan, scenes)
+            if voice_sample:
+                import os as _os
+                _os.environ["VOICE_SAMPLE"] = voice_sample
             voice_path = self.audio_gen.generate_voice(narration, job_id)
 
             # ── Step 4: Music ─────────────────────────────────────────────────

@@ -9,16 +9,24 @@ import os, torch, subprocess
 OUTPUT_DIR = "temp"
 
 class VideoGenerator:
+    # Class-level cache so models survive across multiple job instances
+    _cls_wan_pipe  = None
+    _cls_wan_t2v   = None
+    _cls_wan_i2v   = None
+    _cls_wan_export = None
+    _cls_ltx_pipe  = None
+    _cls_ltx_i2v   = None
+    _cls_ltx_t2v   = None
+
     def __init__(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        self._wan_pipe = None
-        self._ltx_pipe = None
 
     # ── Public ────────────────────────────────────────────────────────────────
 
     def generate(self, prompt, duration=5, resolution="720p",
                  style="cinematic", scene_id="scene",
-                 image_path=None, model="wan22") -> str:
+                 image_path=None, model="wan22",
+                 fps=16, steps=15) -> str:
         """
         Generate a video clip.
         image_path: None = text-to-video | path = image-to-video (frame continuity)
@@ -29,22 +37,20 @@ class VideoGenerator:
         negative    = ("blurry, low quality, distorted, watermark, text overlay, "
                        "bad anatomy, artifacts, overexposed")
         w, h = (1280, 720) if resolution in ("720p", "1080p") else (848, 480)
-        fps  = 24
         frames = max(9, duration * fps)  # LTX minimum 9 frames
 
-        print(f"[VideoGen] {scene_id} | {model} | {resolution} | {duration}s | continuity={'yes' if image_path else 'no'}")
+        print(f"[VideoGen] {scene_id} | {model} | {resolution} | {duration}s | {fps}fps | {steps}steps | continuity={'yes' if image_path else 'no'}")
 
         try:
             if model == "ltx":
                 return self._gen_ltx(enhanced, negative, w, h, frames, fps, image_path, output_path)
             elif model == "both":
-                # WAN for longer/key scenes, LTX for short ones
                 if duration >= 8:
-                    return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path)
+                    return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path, steps)
                 else:
                     return self._gen_ltx(enhanced, negative, w, h, frames, fps, image_path, output_path)
             else:
-                return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path)
+                return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path, steps)
 
         except torch.cuda.OutOfMemoryError:
             print("[VideoGen] ⚠️ OOM — зменшую роздільність...")
@@ -52,7 +58,7 @@ class VideoGenerator:
             w, h = 848, 480
             if model == "ltx":
                 return self._gen_ltx(enhanced, negative, w, h, frames, fps, image_path, output_path)
-            return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path)
+            return self._gen_wan(enhanced, negative, w, h, frames, fps, image_path, output_path, steps)
 
     def extract_last_frame(self, video_path: str, output_path: str) -> str:
         """
@@ -79,44 +85,87 @@ class VideoGenerator:
 
     # ── WAN 2.1 ───────────────────────────────────────────────────────────────
 
+    @property
+    def _wan_pipe(self):  return VideoGenerator._cls_wan_pipe
+    @_wan_pipe.setter
+    def _wan_pipe(self, v): VideoGenerator._cls_wan_pipe = v
+
+    @property
+    def _wan_t2v(self):  return VideoGenerator._cls_wan_t2v
+    @_wan_t2v.setter
+    def _wan_t2v(self, v): VideoGenerator._cls_wan_t2v = v
+
+    @property
+    def _wan_i2v(self):  return VideoGenerator._cls_wan_i2v
+    @_wan_i2v.setter
+    def _wan_i2v(self, v): VideoGenerator._cls_wan_i2v = v
+
+    @property
+    def _export(self):  return VideoGenerator._cls_wan_export
+    @_export.setter
+    def _export(self, v): VideoGenerator._cls_wan_export = v
+
     def _load_wan(self):
-        if self._wan_pipe: return
+        if VideoGenerator._cls_wan_pipe: return
         from diffusers import WanPipeline, WanImageToVideoPipeline
         from diffusers.utils import export_to_video
 
         if os.path.exists(self.WAN_T2V_PATH):
             print("[VideoGen] Завантажую WAN 2.1 T2V 14B...")
-            self._wan_t2v = WanPipeline.from_pretrained(
+            VideoGenerator._cls_wan_t2v = WanPipeline.from_pretrained(
                 self.WAN_T2V_PATH,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True
             )
-            self._wan_t2v.enable_model_cpu_offload()
-            self._wan_t2v.enable_vae_slicing()
+            VideoGenerator._cls_wan_t2v.enable_model_cpu_offload()
+            VideoGenerator._cls_wan_t2v.enable_vae_slicing()
         else:
-            self._wan_t2v = None
+            VideoGenerator._cls_wan_t2v = None
             print("[VideoGen] ⚠️ WAN T2V не знайдено в", self.WAN_T2V_PATH)
 
         if os.path.exists(self.WAN_I2V_PATH):
-            print("[VideoGen] Завантажую WAN 2.1 I2V 14B...")
-            self._wan_i2v = WanImageToVideoPipeline.from_pretrained(
+            print("[VideoGen] Завантажую WAN I2V 14B (int8, on GPU)...")
+            from diffusers import WanTransformer3DModel
+            from diffusers import BitsAndBytesConfig as DiffBnBConfig
+
+            # int8 transformer (~14GB) fits in 24GB VRAM.
+            # device_map="auto" tells accelerate to handle GPU placement natively
+            # for quantized models — avoids the forbidden .to() call from dispatch_model.
+            quant_cfg = DiffBnBConfig(load_in_8bit=True)
+            transformer = WanTransformer3DModel.from_pretrained(
                 self.WAN_I2V_PATH,
+                subfolder="transformer",
+                quantization_config=quant_cfg,
                 torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True
+                device_map="auto",
             )
-            self._wan_i2v.enable_sequential_cpu_offload()
-            if hasattr(self._wan_i2v, "enable_vae_slicing"):
-                self._wan_i2v.enable_vae_slicing()
-            print("[VideoGen] WAN I2V готовий ✅")
+            # Load pipeline without torch_dtype so diffusers won't cast the quantized transformer
+            VideoGenerator._cls_wan_i2v = WanImageToVideoPipeline.from_pretrained(
+                self.WAN_I2V_PATH,
+                transformer=transformer,
+                low_cpu_mem_usage=True,
+            )
+            # Move non-quantized components to GPU + bfloat16 (skip transformer — int8 on GPU already)
+            for name, component in VideoGenerator._cls_wan_i2v.components.items():
+                if name == "transformer":
+                    continue
+                if hasattr(component, "to") and hasattr(component, "parameters"):
+                    try:
+                        component.to(device="cuda", dtype=torch.bfloat16)
+                    except Exception as e:
+                        print(f"[VideoGen] ⚠️ {name}.to(cuda) пропущено: {e}")
+            if hasattr(VideoGenerator._cls_wan_i2v, "enable_vae_slicing"):
+                VideoGenerator._cls_wan_i2v.enable_vae_slicing()
+            print("[VideoGen] WAN I2V готовий (int8 GPU) ✅")
         else:
-            self._wan_i2v = None
+            VideoGenerator._cls_wan_i2v = None
             print("[VideoGen] ⚠️ WAN I2V не знайдено в", self.WAN_I2V_PATH)
 
-        self._export  = export_to_video
-        self._wan_pipe = True
+        VideoGenerator._cls_wan_export = export_to_video
+        VideoGenerator._cls_wan_pipe   = True
         print("[VideoGen] WAN 2.1 14B готовий ✅")
 
-    def _gen_wan(self, prompt, negative, w, h, frames, fps, image_path, output_path):
+    def _gen_wan(self, prompt, negative, w, h, frames, fps, image_path, output_path, steps=15):
         self._load_wan()
         from PIL import Image
         import numpy as np
@@ -143,7 +192,7 @@ class VideoGenerator:
             out = self._wan_i2v(
                 image=img, prompt=prompt, negative_prompt=negative,
                 height=h, width=w, num_frames=frames,
-                guidance_scale=5.0, num_inference_steps=30,
+                guidance_scale=5.0, num_inference_steps=steps,
             ).frames[0]
         else:
             out = self._wan_t2v(
