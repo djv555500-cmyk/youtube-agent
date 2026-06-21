@@ -5,7 +5,13 @@ Supports:
   - frame continuity (last frame → first frame of next clip)
   - configurable clip duration: 5 | 10 | 15 | 20 | auto
 """
-import os, torch, subprocess
+import os, torch, subprocess, shutil
+
+def _ffmpeg():
+    p = shutil.which("ffmpeg")
+    if p: return p
+    c = "/workspace/bin/ffmpeg"
+    return c if os.path.exists(c) else "ffmpeg"
 OUTPUT_DIR = "temp"
 
 class VideoGenerator:
@@ -66,7 +72,7 @@ class VideoGenerator:
         Used for frame continuity: last frame → first frame of next clip.
         """
         cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg(), "-y",
             "-sseof", "-0.1",       # seek to 0.1s before end
             "-i", video_path,
             "-frames:v", "1",

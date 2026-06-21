@@ -182,11 +182,15 @@ class VideoAgent:
                 _os.environ["VOICE_SAMPLE"] = voice_sample
             voice_path = self.audio_gen.generate_voice(narration, job_id)
 
-            # ── Step 4: Music ─────────────────────────────────────────────────
-            db.update_job(job_id, progress=82, progress_text="🎵 Генерація музики...")
-            mood       = self._dominant_mood(scenes)
-            total_dur  = sum(self._resolve_duration(s, clip_duration) for s in scenes) + 10
-            music_path = self.audio_gen.generate_music(mood, total_dur, job_id)
+            # ── Step 4: Music (optional — skip if audiocraft not installed) ────
+            music_path = None
+            try:
+                db.update_job(job_id, progress=82, progress_text="🎵 Генерація музики...")
+                mood       = self._dominant_mood(scenes)
+                total_dur  = sum(self._resolve_duration(s, clip_duration) for s in scenes) + 10
+                music_path = self.audio_gen.generate_music(mood, total_dur, job_id)
+            except Exception as me:
+                db.add_log(job_id, f"⚠️ Музика пропущена: {type(me).__name__}")
 
             # ── Step 5: Merge ─────────────────────────────────────────────────
             db.update_job(job_id, progress=92, progress_text="✂️ Склеюю фінальне відео...")

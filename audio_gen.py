@@ -7,7 +7,17 @@ import numpy as np
 import soundfile as sf
 
 OUTPUT_DIR  = "temp"
-VOICE_LANG  = os.environ.get("VOICE_LANG", "uk")
+VOICE_LANG  = os.environ.get("VOICE_LANG", "en")
+
+# XTTS v2 supported langs (Ukrainian not officially supported — use 'ru' as fallback)
+_XTTS_LANGS = {"en","es","fr","de","it","pt","pl","tr","ru","nl","cs","ar","zh-cn","hu","ko","ja","hi"}
+
+def _xtts_lang(lang: str) -> str:
+    if lang in _XTTS_LANGS:
+        return lang
+    if lang == "uk":
+        return "ru"
+    return "en"
 # Path to a WAV/MP3 sample of the voice to clone (3-10 sec)
 VOICE_SAMPLE = os.environ.get("VOICE_SAMPLE", "")
 
@@ -25,8 +35,31 @@ class AudioGenerator:
             return
         import os as _os
         _os.environ["COQUI_TOS_AGREED"] = "1"
+
+        # Patch 1: strip legacy coqpit from packages_distributions so coqui-tts __init__ doesn't block
+        import importlib.metadata as _meta
+        _orig_pkgs = _meta.packages_distributions
+        def _patched_pkgs():
+            d = dict(_orig_pkgs())
+            if "coqpit" in d:
+                d["coqpit"] = [p for p in d["coqpit"] if p != "coqpit"]
+            return d
+        _meta.packages_distributions = _patched_pkgs
+
+        # Patch 2: stub removed symbols for transformers 5.x compatibility
+        import transformers as _tr
+        import transformers.pytorch_utils as _pu
+        import torch as _torch
+        for _cls in ("BeamSearchScorer", "ConstrainedBeamSearchScorer",
+                     "DisjunctiveConstraint", "PhrasalConstraint"):
+            if not hasattr(_tr, _cls):
+                setattr(_tr, _cls, type(_cls, (), {}))
+        if not hasattr(_pu, "isin_mps_friendly"):
+            _pu.isin_mps_friendly = _torch.isin
+
         print("[Audio] Завантажую XTTS v2...")
         from TTS.api import TTS
+        _meta.packages_distributions = _orig_pkgs  # restore
         use_gpu = torch.cuda.is_available() and not self._gpu_busy()
         self.tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
         print(f"[Audio] XTTS v2 готовий ✅ (gpu={use_gpu})")
@@ -47,22 +80,22 @@ class AudioGenerator:
 
         speaker_wav = VOICE_SAMPLE if VOICE_SAMPLE and os.path.exists(VOICE_SAMPLE) else None
 
+        lang = _xtts_lang(VOICE_LANG)
         if speaker_wav:
             print(f"[Audio] Клонування голосу з: {speaker_wav}")
             self.tts_model.tts_to_file(
                 text=text,
                 speaker_wav=speaker_wav,
-                language=VOICE_LANG,
+                language=lang,
                 file_path=output_path,
             )
         else:
-            # Fallback: built-in speaker
             speakers = self.tts_model.speakers or []
-            speaker = next((s for s in speakers if "uk" in s.lower()), None) or (speakers[0] if speakers else None)
+            speaker = speakers[0] if speakers else None
             self.tts_model.tts_to_file(
                 text=text,
                 speaker=speaker,
-                language=VOICE_LANG,
+                language=lang,
                 file_path=output_path,
             )
 
