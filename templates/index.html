@@ -277,6 +277,60 @@ input:checked+.slider:before{transform:translateX(20px)}
       </div>
     </div>
 
+    <!-- ── РОЗШИРЕНІ НАЛАШТУВАННЯ ── -->
+    <div class="section">
+      <span class="lbl">Розширені налаштування відео</span>
+      <div class="g2">
+        <div>
+          <span class="lbl">FPS (кадрів/сек)</span>
+          <div class="seg">
+            <button class="seg-btn" onclick="setMode('fps','8',this)">8</button>
+            <button class="seg-btn" onclick="setMode('fps','12',this)">12</button>
+            <button class="seg-btn active" onclick="setMode('fps','16',this)">16</button>
+            <button class="seg-btn" onclick="setMode('fps','24',this)">24</button>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:var(--muted);font-family:'Space Mono',monospace" id="fps-hint">
+            16 fps — баланс швидкості та якості
+          </div>
+        </div>
+        <div>
+          <span class="lbl">Кроки inference</span>
+          <div class="seg">
+            <button class="seg-btn" onclick="setMode('steps','10',this)">10</button>
+            <button class="seg-btn active" onclick="setMode('steps','15',this)">15</button>
+            <button class="seg-btn" onclick="setMode('steps','20',this)">20</button>
+            <button class="seg-btn" onclick="setMode('steps','30',this)">30</button>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:var(--muted);font-family:'Space Mono',monospace" id="steps-hint">
+            15 — швидко, хороша якість
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ГОЛОС ── -->
+    <div class="section">
+      <span class="lbl">🎙️ Клонування голосу</span>
+      <div class="toggle-row" style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:10px">
+        <div>
+          <div class="toggle-label">Використати свій голос</div>
+          <div class="toggle-desc">Завантаж 3–10 сек WAV/MP3 для клонування голосу через XTTS v2</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="voice-clone" onchange="toggle('panel-voice', this.checked)">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="panel-voice" class="panel">
+        <div class="upload-area" id="voice-upload-area" onclick="document.getElementById('voice-input').click()">
+          <input type="file" id="voice-input" accept="audio/*,.wav,.mp3,.ogg" onchange="handleVoice(event)" style="display:none">
+          <div class="u-icon">🎤</div>
+          <div class="u-text">Натисни щоб завантажити голосовий зразок (WAV/MP3, 3–10 сек)</div>
+          <div class="u-count" id="voice-name">Файл не вибрано</div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── КІЛЬКІСТЬ ── -->
     <div class="section">
       <span class="lbl">Кількість відео</span>
@@ -326,9 +380,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
-const modes = { prompt: 'auto', model: 'wan22', photo: 'none', sched: 'now', clip: '5' };
+const modes = { prompt: 'auto', model: 'wan22', photo: 'none', sched: 'now', clip: '5', fps: '16', steps: '15' };
+const fpsHints   = { '8':'8 fps — найшвидше, менше кадрів', '12':'12 fps — швидко, прийнятна плавність', '16':'16 fps — баланс швидкості та якості', '24':'24 fps — кінематографічно, повільніше' };
+const stepsHints = { '10':'10 — дуже швидко, нижча якість', '15':'15 — швидко, хороша якість', '20':'20 — стандарт WAN 2.2', '30':'30 — максимальна якість, повільно' };
 let count = 1;
 let uploadedFiles = [];
+let voiceSamplePath = '';
 
 const clipHints = {
   '5':    '5 сек — динамічна зміна сцен, підходить для екшн та топ-відео',
@@ -366,6 +423,12 @@ function setMode(type, val, btn) {
   if (type === 'clip') {
     document.getElementById('clip-hint').textContent = clipHints[val] || '';
   }
+  if (type === 'fps') {
+    document.getElementById('fps-hint').textContent = fpsHints[val] || '';
+  }
+  if (type === 'steps') {
+    document.getElementById('steps-hint').textContent = stepsHints[val] || '';
+  }
 }
 
 function toggle(id, show) {
@@ -376,6 +439,23 @@ function setCount(n, btn) {
   count = n;
   btn.closest('.seg').querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+}
+
+// ── Voice upload ──
+async function handleVoice(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('voice-name').textContent = file.name;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/api/upload_voice', { method: 'POST', body: fd });
+    const data = await res.json();
+    voiceSamplePath = data.path || '';
+    document.getElementById('voice-upload-area').style.borderColor = 'var(--success)';
+  } catch(e) {
+    document.getElementById('voice-name').textContent = 'Помилка завантаження';
+  }
 }
 
 // ── File upload ──
@@ -437,7 +517,10 @@ async function generate() {
     photo_approval: document.getElementById('photo-approval').checked,
     uploaded_photos: uploadedPhotos,
     clip_duration: modes.clip,
-    frame_continuity: document.getElementById('frame-continuity').checked
+    frame_continuity: document.getElementById('frame-continuity').checked,
+    fps:   parseInt(modes.fps),
+    steps: parseInt(modes.steps),
+    voice_sample: document.getElementById('voice-clone').checked ? voiceSamplePath : '',
   };
 
   try {
