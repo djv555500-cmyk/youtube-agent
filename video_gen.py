@@ -124,39 +124,16 @@ class VideoGenerator:
             print("[VideoGen] ⚠️ WAN T2V не знайдено в", self.WAN_T2V_PATH)
 
         if os.path.exists(self.WAN_I2V_PATH):
-            print("[VideoGen] Завантажую WAN I2V 14B (int8, on GPU)...")
-            from diffusers import WanTransformer3DModel
-            from diffusers import BitsAndBytesConfig as DiffBnBConfig
-
-            # int8 transformer (~14GB) fits in 24GB VRAM.
-            # device_map="auto" tells accelerate to handle GPU placement natively
-            # for quantized models — avoids the forbidden .to() call from dispatch_model.
-            quant_cfg = DiffBnBConfig(load_in_8bit=True)
-            transformer = WanTransformer3DModel.from_pretrained(
-                self.WAN_I2V_PATH,
-                subfolder="transformer",
-                quantization_config=quant_cfg,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-            )
-            # Load pipeline without torch_dtype so diffusers won't cast the quantized transformer
+            print("[VideoGen] Завантажую WAN I2V 14B...")
             VideoGenerator._cls_wan_i2v = WanImageToVideoPipeline.from_pretrained(
                 self.WAN_I2V_PATH,
-                transformer=transformer,
+                torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             )
-            # Move non-quantized components to GPU + bfloat16 (skip transformer — int8 on GPU already)
-            for name, component in VideoGenerator._cls_wan_i2v.components.items():
-                if name == "transformer":
-                    continue
-                if hasattr(component, "to") and hasattr(component, "parameters"):
-                    try:
-                        component.to(device="cuda", dtype=torch.bfloat16)
-                    except Exception as e:
-                        print(f"[VideoGen] ⚠️ {name}.to(cuda) пропущено: {e}")
+            VideoGenerator._cls_wan_i2v.enable_sequential_cpu_offload()
             if hasattr(VideoGenerator._cls_wan_i2v, "enable_vae_slicing"):
                 VideoGenerator._cls_wan_i2v.enable_vae_slicing()
-            print("[VideoGen] WAN I2V готовий (int8 GPU) ✅")
+            print("[VideoGen] WAN I2V готовий (CPU offload) ✅")
         else:
             VideoGenerator._cls_wan_i2v = None
             print("[VideoGen] ⚠️ WAN I2V не знайдено в", self.WAN_I2V_PATH)
@@ -166,13 +143,36 @@ class VideoGenerator:
         print("[VideoGen] WAN 2.1 14B готовий ✅")
 
     def _gen_wan(self, prompt, negative, w, h, frames, fps, image_path, output_path, steps=15):
+        """Generate via ComfyUI if available, else fall back to diffusers."""
+        if self._comfyui_available():
+            return self._gen_wan_comfyui(prompt, negative, w, h, frames, fps,
+                                          image_path, output_path, steps)
+        return self._gen_wan_diffusers(prompt, negative, w, h, frames, fps,
+                                        image_path, output_path, steps)
+
+    def _comfyui_available(self):
+        try:
+            import urllib.request
+            urllib.request.urlopen("http://127.0.0.1:8188/system_stats", timeout=2)
+            return True
+        except Exception:
+            return False
+
+    def _gen_wan_comfyui(self, prompt, negative, w, h, frames, fps, image_path, output_path, steps):
+        from comfyui_client import generate_video
+        resolution = "720p" if h >= 720 else "480p"
+        duration = frames / fps
+        print(f"[VideoGen] ComfyUI WAN | {resolution} | {duration:.1f}s | {steps}steps")
+        return generate_video(prompt, output_path, duration=duration, resolution=resolution,
+                               fps=fps, steps=steps, image_path=image_path, negative=negative)
+
+    def _gen_wan_diffusers(self, prompt, negative, w, h, frames, fps, image_path, output_path, steps=15):
         self._load_wan()
         from PIL import Image
         import numpy as np
 
         use_i2v = image_path and os.path.exists(image_path)
 
-        # Fallback: no T2V model but I2V is available — use neutral gray start frame
         if not use_i2v and self._wan_t2v is None and self._wan_i2v is not None:
             gray = Image.fromarray(np.full((h, w, 3), 128, dtype=np.uint8))
             tmp_path = output_path.replace(".mp4", "_init.png")
