@@ -5,9 +5,19 @@ Concatenates clips, adds voice + music, exports final video
 import os
 import subprocess
 import json
+import shutil
 
 OUTPUT_DIR = "outputs"
 TEMP_DIR = "temp"
+
+def _ffmpeg():
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    candidate = "/workspace/bin/ffmpeg"
+    if os.path.exists(candidate):
+        return candidate
+    raise RuntimeError("ffmpeg not found — install it or set PATH")
 
 
 class VideoMerger:
@@ -33,16 +43,22 @@ class VideoMerger:
         self._concat_clips(clips, concat_path)
 
         # 2. Mix voice + music
-        mixed_audio = f"{TEMP_DIR}/{job_id}_audio_mix.aac"
-        self._mix_audio(voice_path, music_path, mixed_audio)
-
-        # 3. Combine video + audio
         safe_title = "".join(c for c in title if c.isalnum() or c in " _-")[:50]
         final_path = f"{OUTPUT_DIR}/{job_id}_{safe_title}.mp4"
-        self._combine(concat_path, mixed_audio, final_path)
+
+        if voice_path and os.path.exists(voice_path):
+            mixed_audio = f"{TEMP_DIR}/{job_id}_audio_mix.aac"
+            self._mix_audio(voice_path, music_path, mixed_audio)
+            # 3. Combine video + audio
+            self._combine(concat_path, mixed_audio, final_path)
+        else:
+            # No audio — just copy video
+            import shutil as _sh
+            _sh.copy2(concat_path, final_path)
+            mixed_audio = None
 
         # 4. Cleanup temp files
-        self._cleanup([concat_path, mixed_audio] + clips)
+        self._cleanup([concat_path] + ([mixed_audio] if mixed_audio else []) + clips)
 
         print(f"[Merger] ✅ Фінальне відео: {final_path}")
         return final_path
@@ -56,7 +72,7 @@ class VideoMerger:
                 f.write(f"file '{os.path.abspath(clip)}'\n")
 
         cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg(), "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", list_path,
@@ -69,28 +85,32 @@ class VideoMerger:
         ]
         self._run(cmd, "concat clips")
 
-    def _mix_audio(self, voice_path: str, music_path: str, output: str):
-        """Mix voice (loud) + music (quiet background)"""
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", voice_path,
-            "-i", music_path,
-            "-filter_complex",
-            # Voice at full volume, music at 15% in background
-            "[0:a]volume=1.0[voice];"
-            "[1:a]volume=0.15[music];"
-            "[voice][music]amix=inputs=2:duration=first:dropout_transition=3[out]",
-            "-map", "[out]",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            output
-        ]
+    def _mix_audio(self, voice_path: str, music_path, output: str):
+        """Mix voice + optional music into AAC."""
+        if music_path and os.path.exists(music_path):
+            cmd = [
+                _ffmpeg(), "-y",
+                "-i", voice_path,
+                "-i", music_path,
+                "-filter_complex",
+                "[0:a]volume=1.0[voice];"
+                "[1:a]volume=0.15[music];"
+                "[voice][music]amix=inputs=2:duration=first:dropout_transition=3[out]",
+                "-map", "[out]",
+                "-c:a", "aac", "-b:a", "192k", output
+            ]
+        else:
+            cmd = [
+                _ffmpeg(), "-y",
+                "-i", voice_path,
+                "-c:a", "aac", "-b:a", "192k", output
+            ]
         self._run(cmd, "mix audio")
 
     def _combine(self, video_path: str, audio_path: str, output: str):
         """Combine video + mixed audio into final file"""
         cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg(), "-y",
             "-i", video_path,
             "-i", audio_path,
             "-c:v", "copy",

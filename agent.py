@@ -77,6 +77,9 @@ class VideoAgent:
         uploaded_photos  = cfg.get("uploaded_photos", [])
         frame_continuity = cfg.get("frame_continuity", False)
         clip_duration    = cfg.get("clip_duration", "5")   # "5"|"10"|"15"|"20"|"auto"
+        fps              = int(cfg.get("fps", 16))
+        steps            = int(cfg.get("steps", 15))
+        voice_sample     = cfg.get("voice_sample", "")
 
         try:
             # ── Step 1: Plan ──────────────────────────────────────────────────
@@ -159,7 +162,9 @@ class VideoAgent:
                     style=scene.get("style_hint", style),
                     scene_id=scene_id,
                     image_path=image_path,
-                    model=video_model
+                    model=video_model,
+                    fps=fps,
+                    steps=steps,
                 )
                 clip_paths.append(clip)
 
@@ -172,13 +177,20 @@ class VideoAgent:
             # ── Step 3: Voice ─────────────────────────────────────────────────
             db.update_job(job_id, progress=72, progress_text="🎙️ Генерація голосу...")
             narration  = self._build_narration(plan, scenes)
+            if voice_sample:
+                import os as _os
+                _os.environ["VOICE_SAMPLE"] = voice_sample
             voice_path = self.audio_gen.generate_voice(narration, job_id)
 
-            # ── Step 4: Music ─────────────────────────────────────────────────
-            db.update_job(job_id, progress=82, progress_text="🎵 Генерація музики...")
-            mood       = self._dominant_mood(scenes)
-            total_dur  = sum(self._resolve_duration(s, clip_duration) for s in scenes) + 10
-            music_path = self.audio_gen.generate_music(mood, total_dur, job_id)
+            # ── Step 4: Music (optional — skip if audiocraft not installed) ────
+            music_path = None
+            try:
+                db.update_job(job_id, progress=82, progress_text="🎵 Генерація музики...")
+                mood       = self._dominant_mood(scenes)
+                total_dur  = sum(self._resolve_duration(s, clip_duration) for s in scenes) + 10
+                music_path = self.audio_gen.generate_music(mood, total_dur, job_id)
+            except Exception as me:
+                db.add_log(job_id, f"⚠️ Музика пропущена: {type(me).__name__}")
 
             # ── Step 5: Merge ─────────────────────────────────────────────────
             db.update_job(job_id, progress=92, progress_text="✂️ Склеюю фінальне відео...")
@@ -205,7 +217,7 @@ class VideoAgent:
             avg_dur = 10
         else:
             avg_dur = int(clip_duration)
-        scene_count = max(5, int((duration_min * 60) / avg_dur))
+        scene_count = max(1, int((duration_min * 60) / avg_dur))
 
         msg = (f'Тема: "{topic}"\nСтиль: {style}\n'
                f'Тривалість відео: ~{duration_min} хв (~{scene_count} сцен)\n'
